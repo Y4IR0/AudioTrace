@@ -10,7 +10,7 @@ public class SS_AudioSourceRegister : MonoBehaviour
     private void Awake()
     {
         audioSource = GetComponent<AudioSource>();
-        SS_AudioSourceManager.instance.audioSources.Add(audioSource);
+        SS_AudioSourceManager.Instance.AudioSources.Add(audioSource);
     }
 
     private void Update()
@@ -23,11 +23,11 @@ public class SS_AudioSourceRegister : MonoBehaviour
         switch (isPlaying)
         {
             case true:
-                SS_AudioSourceManager.instance.playingAudioSources.Add(audioSource);
+                SS_AudioSourceManager.Instance.PlayingAudioSources.Add(audioSource);
                 break;
             
             case false:
-                SS_AudioSourceManager.instance.playingAudioSources.Remove(audioSource);
+                SS_AudioSourceManager.Instance.PlayingAudioSources.Remove(audioSource);
                 break;
         }
         

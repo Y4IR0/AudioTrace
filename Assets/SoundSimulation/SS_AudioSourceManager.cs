@@ -4,15 +4,15 @@ using UnityEngine;
 [DefaultExecutionOrder(-100)]
 public class SS_AudioSourceManager : MonoBehaviour
 {
-    public static SS_AudioSourceManager instance;
+    public static SS_AudioSourceManager Instance;
     
-    public List<AudioSource> audioSources = new();
-    public List<AudioSource> playingAudioSources = new();
+    public List<AudioSource> AudioSources = new();
+    public List<AudioSource> PlayingAudioSources = new();
     
     
     
     private void Awake()
     {
-        instance = this;
+        Instance = this;
     }
 }
