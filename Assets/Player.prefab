@@ -355,7 +355,7 @@ Transform:
   m_GameObject: {fileID: 3746083179476138391}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalPosition: {x: 0, y: 0.75, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 1
   m_Children: []
@@ -374,8 +374,12 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SS_ListenerProbesDistributer
   probeCount: 200
+  probeLayers: 10
   maxProbeDistance: 35
+  probeHeight: 1.75
+  verticalImportance: 0.4
   listenerCollider: {fileID: 0}
   showProbes: 0
+  showPaths: 0
   showDebugCanvases: 0
   debugCanvasPrefab: {fileID: 701183362861877991, guid: b0d0a74f42665c240a9989d5781c1ca0, type: 3}

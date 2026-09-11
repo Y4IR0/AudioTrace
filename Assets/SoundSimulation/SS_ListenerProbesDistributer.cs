@@ -36,6 +36,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     {
         public AudioSource AudioSource;
         public ProbeData Probe;
+        public float Length;
         public List<Vector3> Points;
         
         public Path(
@@ -46,6 +47,8 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
             AudioSource = audioSource;
             Probe = probe;
             Points = points;
+            
+            Length = Vector3.Distance(points[1], points[0]) + probe.Distance;
         }
     }
 
@@ -65,9 +68,13 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     // ===================================== Variables =====================================
     [Header("Probe Settings")]
     [SerializeField] private int probeCount = 200;
+    [SerializeField] private int probeLayers = 10;
     [SerializeField] private float maxProbeDistance = 35f;
+    [SerializeField] private float probeHeight = 1.5f;
+    [Range(0f, 1f)] [SerializeField] private float verticalImportance = 0.4f;
     
     private ProbeData[] _probes;
+    private Vector3[] _probeDirections;
     
     
     [Header("Direct AudioSource Settings")]
@@ -82,6 +89,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     
     [Header("Audio Settings")]
     private Dictionary<AudioSource, AudioSource> _audioSourceClones = new();
+    private Dictionary<AudioSource, float> _occlusions = new();
     
     
     [Header("Debugging")]
@@ -120,6 +128,8 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
             if (!listenerCollider)
                 listenerCollider = gameObject.GetComponentInParent<Collider>();
         }
+
+        GenerateProbeDirections();
     }
     
     private void Update()
@@ -127,6 +137,36 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         UpdateProbes();
         CheckDirectAudioSourceOcclusions();
         PathOccludedAudioSources();
+        UpdateOcclusions();
+        UpdateAudioSourceClones();
+    }
+
+    private void GenerateProbeDirections()
+    {
+        _probeDirections = new Vector3[probeCount];
+        
+        if (probeCount <= 0)
+            return;
+        
+        int probesPerLayer = probeCount / probeLayers;
+
+        for (int layer = 0; layer < probeLayers; layer++)
+        {
+            float y = probeLayers == 1 ? -1f : Mathf.Lerp(-1f, 1f, (float)layer / (probeLayers - 1));
+            y *= (1f - verticalImportance); // Apply verticalImportance
+            
+            for (int i = 0; i < probesPerLayer; i++)
+            {
+                float angle = 2f * Mathf.PI * i / probesPerLayer;
+                float x = Mathf.Cos(angle);
+                float z = Mathf.Sin(angle);
+                
+                Vector3 position = new Vector3(x, y, z);
+                Vector3 direction = position.normalized;
+                
+                _probeDirections[i + (probesPerLayer * layer)] = direction;
+            }
+        }
     }
 
     private void UpdateProbes()
@@ -135,7 +175,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         
         for (int i = 0; i < probeCount; i++)
         {
-            Ray ray = new Ray(origin, Random.onUnitSphere);
+            Ray ray = new Ray(origin, _probeDirections[i]);
 
             // Update probe
             if (Physics.Raycast(ray, out RaycastHit hit, maxProbeDistance))
@@ -212,6 +252,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
                 break;
             }
 
+            // Path found
             if (index != -1)
             {
                 ProbeData pathedProbe = sortedProbes[index];
@@ -224,8 +265,6 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
                 Path path = new Path(audioSource, pathedProbe, points);
                 _paths.Add(path);
                 
-                CreateOrUpdateAudioSourceClone(path);
-                
                 Debug.Log($"Attempts: {index:D}");
             }
             else
@@ -235,34 +274,90 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         }
     }
 
-    private void CreateOrUpdateAudioSourceClone(Path path)
+    private void UpdateAudioSourceClones()
     {
-        AudioSource original = path.AudioSource;
-
-        // Create clone if not existing yet
-        if (!_audioSourceClones.TryGetValue(original, out AudioSource clone))
+        List<AudioSource> unusedAudioSources = new(_audioSourceClones.Keys);
+        
+        // Update AudioSources
+        foreach (Path currentPath in _paths)
         {
-            GameObject cloneObject = new GameObject($"{original.name}_Indirect");
-            clone = cloneObject.AddComponent<AudioSource>();
+            AudioSource original = currentPath.AudioSource;
+            unusedAudioSources.Remove(original);
+
+            // Create clone if not existing yet
+            if (!_audioSourceClones.TryGetValue(original, out AudioSource clone))
+            {
+                GameObject cloneObject = new GameObject($"{original.name}_Indirect");
+                clone = cloneObject.AddComponent<AudioSource>();
             
-            CopyAudioSourceSettings(original, clone);
+                CopyAudioSourceSettings(original, clone);
             
-            _audioSourceClones.Add(original, clone);
+                _audioSourceClones.Add(original, clone);
             
-            // Prevent overlapping
-            original.mute = true;
-            clone.Play();
-            clone.time = original.time;
+                // Prevent overlapping
+                original.mute = true;
+                clone.Play();
+                clone.time = original.time;
+            }
+        
+            // Position clone
+            Vector3 point0 = currentPath.Points[0];
+            Vector3 point1 = currentPath.Points[1];
+        
+            Vector3 midpoint = Vector3.Lerp(point0, point1, 0.5f);
+            Vector3 direction = (point1 - point0).normalized;
+        
+            clone.transform.position = midpoint + direction;
         }
-        
-        // Position clone
-        Vector3 point0 = path.Points[0];
-        Vector3 point1 = path.Points[1];
-        
-        Vector3 midpoint = Vector3.Lerp(point0, point1, 0.5f);
-        Vector3 direction = (point1 - point0).normalized;
-        
-        clone.transform.position = midpoint + direction;
+
+        // Remove unused AudioSources
+        foreach (AudioSource audioSource in unusedAudioSources)
+        {
+            AudioSource clone = _audioSourceClones[audioSource];
+            
+            // Restore original AudioSource
+            audioSource.mute = false;
+            
+            Destroy(clone.gameObject);
+            _audioSourceClones.Remove(audioSource);
+        }
+    }
+
+    private void UpdateOcclusions()
+    {
+        _occlusions.Clear();
+
+        foreach (AudioSource audioSource in SS_AudioSourceManager.Instance.PlayingAudioSources)
+        {
+            // Check if in line of sight
+            DirectAudioSourceOcclusion directAudioSourceOcclusion =
+                _directAudioSourceOcclusions.Find(x => x.AudioSource == audioSource);
+
+            if (directAudioSourceOcclusion != null && directAudioSourceOcclusion.Collider == listenerCollider)
+            {
+                _occlusions.Add(audioSource, 0f);
+                continue;
+            }
+            
+            // Calculate occlusion via path
+            Path path = _paths.Find(x => x.AudioSource == audioSource);
+
+            if (path != null)
+            {
+                float directDistance = Vector3.Distance(path.Points[0], path.Points[2]);
+                float pathLength = path.Length;
+                float extraDistance = pathLength - directDistance;
+                
+                float occlusion = extraDistance / directDistance;
+                occlusion = Mathf.Clamp01(occlusion);
+                
+                _occlusions.Add(audioSource, occlusion);
+                continue;
+            }
+            
+            // Else
+            _occlusions.Add(audioSource, 0f);
+        }
     }
     
     
