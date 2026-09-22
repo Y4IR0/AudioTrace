@@ -379,6 +379,9 @@ MonoBehaviour:
   probeHeight: 1.75
   verticalImportance: 0.4
   listenerCollider: {fileID: 0}
+  minOcclusionCutoff: 500
+  maxOcclusionCutoff: 22000
+  audioSourceSmoothTime: 0.08
   showProbes: 0
   showPaths: 0
   showDebugCanvases: 0

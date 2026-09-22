@@ -33,4 +33,10 @@ public class SS_AudioSourceRegister : MonoBehaviour
         
         wasPlaying = isPlaying;
     }
+
+    private void OnDisable()
+    {
+        SS_AudioSourceManager.Instance.PlayingAudioSources.Remove(audioSource);
+        wasPlaying = false;
+    }
 }

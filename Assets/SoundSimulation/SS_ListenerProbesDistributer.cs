@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.UIElements;
 using Random = UnityEngine.Random;
 
 public class SS_ListenerProbesDistributer : MonoBehaviour
@@ -16,12 +19,14 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     {
         public Vector3 Position;
         public float Distance;
+        public Vector3 Normal;
+        public bool Hit;
     }
     
     private class DirectAudioSourceOcclusion
     {
-        public AudioSource AudioSource;
-        public Collider Collider;
+        public readonly AudioSource AudioSource;
+        public readonly Collider Collider;
 
         public DirectAudioSourceOcclusion(
             AudioSource audioSource,
@@ -34,10 +39,10 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
 
     private class Path
     {
-        public AudioSource AudioSource;
+        public readonly AudioSource AudioSource;
         public ProbeData Probe;
         public float Length;
-        public List<Vector3> Points;
+        public readonly List<Vector3> Points;
         
         public Path(
             AudioSource audioSource,
@@ -80,16 +85,26 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     [Header("Direct AudioSource Settings")]
     [SerializeField] private Collider listenerCollider;
     
-    private List<DirectAudioSourceOcclusion> _directAudioSourceOcclusions = new();
+    private readonly List<DirectAudioSourceOcclusion> _directAudioSourceOcclusions = new();
     
     
     [Header("Path Settings")]
-    private List<Path> _paths = new();
-    
-    
+    private readonly List<Path> _paths = new();
+
+
     [Header("Audio Settings")]
-    private Dictionary<AudioSource, AudioSource> _audioSourceClones = new();
-    private Dictionary<AudioSource, float> _occlusions = new();
+    [SerializeField] private float minOcclusionCutoff = 500f;
+    [SerializeField] private float maxOcclusionCutoff = 22000f;
+    [SerializeField] private float roomSizeDistance = 20f;
+    [SerializeField] private float audioSourceSmoothTime = 0.08f;
+    
+    private readonly Dictionary<AudioSource, AudioSource> _perceivedAudioSources = new();
+    private readonly Dictionary<AudioSource, AudioLowPassFilter> _audioLowPassFilters = new();
+    private readonly Dictionary<AudioSource, AudioReverbFilter> _audioReverbFilters = new();
+    
+    private readonly Dictionary<AudioSource, float> _occlusions = new();
+    private float _reverbIntensity = 0f;
+    private float _roomSize = 0f;
     
     
     [Header("Debugging")]
@@ -98,7 +113,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
     [SerializeField] private bool showDebugCanvases;
     [SerializeField] private SS_AudioSourceDebugCanvas debugCanvasPrefab;
 
-    private Dictionary<AudioSource, SS_AudioSourceDebugCanvas> _debugCanvases = new();
+    private readonly Dictionary<AudioSource, SS_AudioSourceDebugCanvas> _debugCanvases = new();
 
 
     
@@ -138,7 +153,8 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         CheckDirectAudioSourceOcclusions();
         PathOccludedAudioSources();
         UpdateOcclusions();
-        UpdateAudioSourceClones();
+        UpdateReverbs();
+        UpdatePerceivedAudioSources();
     }
 
     private void GenerateProbeDirections()
@@ -183,7 +199,9 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
                 _probes[i] = new ProbeData
                 {
                     Position = hit.point,
-                    Distance = hit.distance
+                    Distance = hit.distance,
+                    Normal = hit.normal,
+                    Hit = true
                 };
             }
             else
@@ -191,7 +209,9 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
                 _probes[i] = new ProbeData
                 {
                     Position = origin + ray.direction * maxProbeDistance,
-                    Distance = maxProbeDistance
+                    Distance = maxProbeDistance,
+                    Normal = Vector3.zero,
+                    Hit = false
                 };
             }
         }
@@ -256,7 +276,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
             if (index != -1)
             {
                 ProbeData pathedProbe = sortedProbes[index];
-                List<Vector3> points = new List<Vector3>();
+                List<Vector3> points = new();
                 
                 points.Add(origin);
                 points.Add(pathedProbe.Position);
@@ -264,65 +284,10 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
 
                 Path path = new Path(audioSource, pathedProbe, points);
                 _paths.Add(path);
-                
-                Debug.Log($"Attempts: {index:D}");
-            }
-            else
-            {
-                Debug.LogWarning("No probes found!");
             }
         }
     }
-
-    private void UpdateAudioSourceClones()
-    {
-        List<AudioSource> unusedAudioSources = new(_audioSourceClones.Keys);
-        
-        // Update AudioSources
-        foreach (Path currentPath in _paths)
-        {
-            AudioSource original = currentPath.AudioSource;
-            unusedAudioSources.Remove(original);
-
-            // Create clone if not existing yet
-            if (!_audioSourceClones.TryGetValue(original, out AudioSource clone))
-            {
-                GameObject cloneObject = new GameObject($"{original.name}_Indirect");
-                clone = cloneObject.AddComponent<AudioSource>();
-            
-                CopyAudioSourceSettings(original, clone);
-            
-                _audioSourceClones.Add(original, clone);
-            
-                // Prevent overlapping
-                original.mute = true;
-                clone.Play();
-                clone.time = original.time;
-            }
-        
-            // Position clone
-            Vector3 point0 = currentPath.Points[0];
-            Vector3 point1 = currentPath.Points[1];
-        
-            Vector3 midpoint = Vector3.Lerp(point0, point1, 0.5f);
-            Vector3 direction = (point1 - point0).normalized;
-        
-            clone.transform.position = midpoint + direction;
-        }
-
-        // Remove unused AudioSources
-        foreach (AudioSource audioSource in unusedAudioSources)
-        {
-            AudioSource clone = _audioSourceClones[audioSource];
-            
-            // Restore original AudioSource
-            audioSource.mute = false;
-            
-            Destroy(clone.gameObject);
-            _audioSourceClones.Remove(audioSource);
-        }
-    }
-
+    
     private void UpdateOcclusions()
     {
         _occlusions.Clear();
@@ -344,19 +309,201 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
 
             if (path != null)
             {
-                float directDistance = Vector3.Distance(path.Points[0], path.Points[2]);
-                float pathLength = path.Length;
-                float extraDistance = pathLength - directDistance;
+                float distance = Vector3.Distance(path.Points[0], path.Points[2]);
                 
-                float occlusion = extraDistance / directDistance;
+                float distanceFactor = distance / audioSource.maxDistance;
+                
+                float occlusion = 0.6f + distanceFactor;
                 occlusion = Mathf.Clamp01(occlusion);
                 
                 _occlusions.Add(audioSource, occlusion);
                 continue;
             }
             
-            // Else
-            _occlusions.Add(audioSource, 0f);
+            // No direct line of sight and no path
+            _occlusions.Add(audioSource, 1f);
+        }
+    }
+    
+    private void UpdateReverbs()
+    {
+        // Reverb Intensity
+        float normalScore = 0f;
+        int hitCount = 0;
+
+        for (int i = 0; i < _probes.Length; i++)
+        {
+            ProbeData probe = _probes[i];
+            
+            if (probe == null || !probe.Hit) // Check if hit
+                continue;
+            
+            Vector3 direction = _probeDirections[i];
+            float directness = Vector3.Dot(probe.Normal, -direction);
+            directness = Mathf.Pow(directness, 0.4f);
+            directness = Mathf.Clamp01(directness);
+            
+            normalScore += directness;
+            hitCount++;
+        }
+        
+        if (hitCount > 0)
+            normalScore /= hitCount;
+        
+        float outsideMultiplier = (float)hitCount / (float)_probes.Length; // Less reverb when near exit
+        outsideMultiplier = Mathf.Pow(outsideMultiplier, 4f);
+        normalScore *= outsideMultiplier;
+        
+        _reverbIntensity = Mathf.Clamp01(normalScore);
+        
+        
+        
+        
+        // Room Size
+        List<ProbeData> sortedProbes = _probes.ToList();
+        sortedProbes.Sort((a, b) => b.Distance.CompareTo(a.Distance));
+        
+        float totalDistance = 0;
+        int useCount = (int)(sortedProbes.Count * 0.6f);
+        
+        for (int i = 0; i < useCount; i++)
+        {
+            ProbeData probe = sortedProbes[i];
+            totalDistance += probe.Distance;
+        }
+        
+        float averageDistance = (totalDistance / useCount) / roomSizeDistance;
+        averageDistance = Mathf.Clamp01(averageDistance);
+        
+        _roomSize = averageDistance;
+    }
+
+    private void UpdatePerceivedAudioSources()
+    {
+        // Create perceivedAudioSources
+        foreach (AudioSource audioSource in SS_AudioSourceManager.Instance.PlayingAudioSources)
+        {
+            if (_perceivedAudioSources.TryGetValue(audioSource, out AudioSource perceivedAudioSource)) // Check if already exists
+                continue;
+            
+            
+            GameObject cloneObject = new GameObject($"{audioSource.name}_Indirect");
+            perceivedAudioSource = cloneObject.AddComponent<AudioSource>();
+            
+            SetDefaultAudioSourceSettings(audioSource, perceivedAudioSource);
+            perceivedAudioSource.transform.position = audioSource.transform.position;
+            
+            _perceivedAudioSources.Add(audioSource, perceivedAudioSource);
+                
+                
+            // Occlusion
+            AudioLowPassFilter cloneAudioLowPassFilter = cloneObject.AddComponent<AudioLowPassFilter>();
+            if (audioSource.gameObject.TryGetComponent<AudioLowPassFilter>(out AudioLowPassFilter originalAudioLowPassFilter))
+                SetDefaultAudioLowPassFilterSettings(cloneAudioLowPassFilter, originalAudioLowPassFilter, audioSource);
+            else
+                SetDefaultAudioLowPassFilterSettings(cloneAudioLowPassFilter, audioSource);
+            
+            _audioLowPassFilters.Add(audioSource, cloneAudioLowPassFilter);
+                
+            
+            // Reverb
+            AudioReverbFilter cloneAudioReverbFilter = cloneObject.AddComponent<AudioReverbFilter>();
+            if (audioSource.gameObject.TryGetComponent<AudioReverbFilter>(out AudioReverbFilter originalAudioReverbFilter))
+                SetDefaultAudioReverbFilterSettings(cloneAudioReverbFilter, originalAudioReverbFilter);
+            else
+                SetDefaultAudioReverbFilterSettings(cloneAudioReverbFilter);
+            
+            _audioReverbFilters.Add(audioSource, cloneAudioReverbFilter);
+            
+                
+            // Prevent overlapping
+            audioSource.mute = true;
+            perceivedAudioSource.Play();
+        }
+        
+        // Destroy unused perceivedAudioSources
+        List<AudioSource> perceivedAudioSources = new List<AudioSource>(_perceivedAudioSources.Keys);
+        
+        foreach (AudioSource audioSource in perceivedAudioSources)
+        {
+            if (SS_AudioSourceManager.Instance.PlayingAudioSources.Contains(audioSource)) // Check if audioSource is playing
+                continue;
+            
+            // Remove perceivedAudioSource
+            AudioSource perceivedAudioSource = _perceivedAudioSources[audioSource];
+            Destroy(perceivedAudioSource.gameObject);
+            
+            _perceivedAudioSources.Remove(audioSource);
+            _audioLowPassFilters.Remove(audioSource);
+            _audioReverbFilters.Remove(audioSource);
+            
+            // Remove transition velocities
+            foreach (var key in _floatTransitionVelocities.Keys.ToList())
+            {
+                if (key.Item1 == audioSource)
+                    _floatTransitionVelocities.Remove(key);
+            }
+            
+            foreach (var key in _vectorTransitionVelocities.Keys.ToList())
+            {
+                if (key.Item1 == audioSource)
+                    _vectorTransitionVelocities.Remove(key);
+            }
+            
+            // Restore original audioSource
+            audioSource.mute = false;
+        }
+        
+        // Sync time
+        foreach (AudioSource audioSource in _perceivedAudioSources.Keys)
+        {
+            AudioSource perceivedAudioSource = _perceivedAudioSources[audioSource];
+            float margin = 0.05f;
+            
+            if (Mathf.Abs(perceivedAudioSource.time - audioSource.time) < margin) // Check if synced
+                continue;
+            
+            perceivedAudioSource.time = audioSource.time;
+        }
+        
+        // Update position
+        foreach (AudioSource audioSource in _perceivedAudioSources.Keys)
+        {
+            AudioSource perceivedAudioSource = _perceivedAudioSources[audioSource];
+            
+            Vector3 targetPosition = Vector3.zero;
+            
+            Path connectedPath = null;
+            foreach (Path path in _paths)
+            {
+                if (path.AudioSource == audioSource)
+                    connectedPath = path;
+            }
+
+            if (connectedPath != null)
+            {
+                Vector3 point0 = connectedPath.Points[0];
+                Vector3 point1 = connectedPath.Points[1];
+                Vector3 midpoint = Vector3.Lerp(point0, point1, 0.5f);
+                Vector3 direction = (point1 - point0).normalized;
+                targetPosition = midpoint + direction;
+            }
+            else
+                targetPosition = audioSource.transform.position;
+            
+            
+            // Transition position
+            perceivedAudioSource.transform.position = Transition(audioSource, "position", perceivedAudioSource.transform.position, targetPosition);
+        }
+
+        // Update components
+        foreach (AudioSource audioSource in _perceivedAudioSources.Keys)
+        {
+            AudioSource perceivedAudioSource = _perceivedAudioSources[audioSource];
+            
+            UpdateAudioSourceSettings(audioSource, perceivedAudioSource);
+            UpdateAudioLowPassFilterSettings(audioSource, _audioLowPassFilters[audioSource]);
+            UpdateAudioReverbFilterSettings(audioSource, _audioReverbFilters[audioSource]);
         }
     }
     
@@ -393,53 +540,178 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         return sortedProbes;
     }
 
-    private void CopyAudioSourceSettings(AudioSource original, AudioSource clone)
+    private void SetDefaultAudioSourceSettings(AudioSource original, AudioSource perceivedAudioSource)
     {
         // Apply settings (can't find any other method)
-        clone.clip = original.clip;
-        clone.outputAudioMixerGroup = original.outputAudioMixerGroup;
-        clone.playOnAwake = original.playOnAwake;
-        clone.loop = original.loop;
-            
-        clone.volume = original.volume;
-        clone.pitch = original.pitch;
-        clone.priority = original.priority;
-            
-        clone.spatialBlend = original.spatialBlend;
-        clone.panStereo = original.panStereo;
-        clone.spatialize = original.spatialize;
-        clone.spatializePostEffects = original.spatializePostEffects;
-        clone.dopplerLevel = original.dopplerLevel;
-        clone.spread = original.spread;
-            
-        clone.rolloffMode = original.rolloffMode;
-        clone.minDistance = original.minDistance;
-        clone.maxDistance = original.maxDistance;
-            
-        clone.reverbZoneMix = original.reverbZoneMix;
-        clone.ignoreListenerVolume = original.ignoreListenerVolume;
-        clone.ignoreListenerPause = original.ignoreListenerPause;
+        perceivedAudioSource.clip = original.clip;
+        perceivedAudioSource.outputAudioMixerGroup = original.outputAudioMixerGroup;
+        perceivedAudioSource.playOnAwake = original.playOnAwake;
+        perceivedAudioSource.loop = original.loop;
+        
+        perceivedAudioSource.volume = original.volume;
+        perceivedAudioSource.pitch = original.pitch;
+        perceivedAudioSource.priority = original.priority;
+        
+        perceivedAudioSource.spatialBlend = original.spatialBlend;
+        perceivedAudioSource.panStereo = original.panStereo;
+        perceivedAudioSource.spatialize = original.spatialize;
+        perceivedAudioSource.spatializePostEffects = original.spatializePostEffects;
+        perceivedAudioSource.dopplerLevel = 0f; //original.dopplerLevel; Having a doppler level creates audio bugs due to the movement of the perceived audio source.
+        perceivedAudioSource.spread = original.spread;
+        
+        perceivedAudioSource.rolloffMode = original.rolloffMode;
+        perceivedAudioSource.minDistance = original.minDistance;
+        perceivedAudioSource.maxDistance = original.maxDistance;
+        
+        perceivedAudioSource.reverbZoneMix = original.reverbZoneMix;
+        perceivedAudioSource.ignoreListenerVolume = original.ignoreListenerVolume;
+        perceivedAudioSource.ignoreListenerPause = original.ignoreListenerPause;
         
         // Curves
-        clone.SetCustomCurve(
+        perceivedAudioSource.SetCustomCurve(
             AudioSourceCurveType.CustomRolloff,
             original.GetCustomCurve(AudioSourceCurveType.CustomRolloff)
             );
         
-        clone.SetCustomCurve(
+        perceivedAudioSource.SetCustomCurve(
             AudioSourceCurveType.ReverbZoneMix,
             original.GetCustomCurve(AudioSourceCurveType.ReverbZoneMix)
         );
         
-        clone.SetCustomCurve(
+        perceivedAudioSource.SetCustomCurve(
             AudioSourceCurveType.SpatialBlend,
             original.GetCustomCurve(AudioSourceCurveType.SpatialBlend)
         );
         
-        clone.SetCustomCurve(
+        perceivedAudioSource.SetCustomCurve(
             AudioSourceCurveType.Spread,
             original.GetCustomCurve(AudioSourceCurveType.Spread)
         );
+    }
+    
+    private void UpdateAudioSourceSettings(AudioSource original, AudioSource perceivedAudioSource)
+    {
+        if (perceivedAudioSource.clip != original.clip)
+        {
+            perceivedAudioSource.clip = original.clip;
+            perceivedAudioSource.Play();
+        }
+        
+        perceivedAudioSource.outputAudioMixerGroup = original.outputAudioMixerGroup;
+        perceivedAudioSource.playOnAwake = original.playOnAwake;
+        perceivedAudioSource.loop = original.loop;
+            
+        perceivedAudioSource.volume = original.volume;
+        perceivedAudioSource.pitch = original.pitch;
+        perceivedAudioSource.priority = original.priority;
+            
+        perceivedAudioSource.spatialBlend = original.spatialBlend;
+        perceivedAudioSource.panStereo = original.panStereo;
+        perceivedAudioSource.spatialize = original.spatialize;
+        perceivedAudioSource.spatializePostEffects = original.spatializePostEffects;
+        //perceivedAudioSource.dopplerLevel = 0f; //original.dopplerLevel; Having a doppler level creates audio bugs due to the movement of the perceived audio source.
+        perceivedAudioSource.spread = original.spread;
+            
+        perceivedAudioSource.rolloffMode = original.rolloffMode;
+        perceivedAudioSource.minDistance = original.minDistance;
+        perceivedAudioSource.maxDistance = original.maxDistance;
+            
+        perceivedAudioSource.reverbZoneMix = original.reverbZoneMix;
+        perceivedAudioSource.ignoreListenerVolume = original.ignoreListenerVolume;
+        perceivedAudioSource.ignoreListenerPause = original.ignoreListenerPause;
+    }
+    
+    // Occlusion
+    private void SetDefaultAudioLowPassFilterSettings(AudioLowPassFilter original, AudioLowPassFilter clone, AudioSource audioSource)
+    {
+        clone.lowpassResonanceQ = original.lowpassResonanceQ;
+        
+        float occlusion = _occlusions.GetValueOrDefault(audioSource, 0f);
+        float targetCutoffFrequency = Mathf.Lerp(maxOcclusionCutoff, minOcclusionCutoff, occlusion);
+        
+        clone.cutoffFrequency = Transition(audioSource, "cutoffFrequency", clone.cutoffFrequency, targetCutoffFrequency);
+    }
+    
+    private void SetDefaultAudioLowPassFilterSettings(AudioLowPassFilter clone, AudioSource audioSource)
+    {
+        clone.lowpassResonanceQ = 1; // No effect
+        
+        float occlusion = _occlusions.GetValueOrDefault(audioSource, 0f);
+        float targetCutoffFrequency = Mathf.Lerp(maxOcclusionCutoff, minOcclusionCutoff, occlusion);
+        
+        clone.cutoffFrequency = Transition(audioSource, "cutoffFrequency", clone.cutoffFrequency, targetCutoffFrequency);
+    }
+    
+    private void UpdateAudioLowPassFilterSettings(AudioSource audioSource, AudioLowPassFilter clone)
+    {
+        float occlusion = _occlusions.GetValueOrDefault(audioSource, 0f);
+        float targetCutoffFrequency = Mathf.Lerp(maxOcclusionCutoff, minOcclusionCutoff, occlusion);
+        
+        clone.cutoffFrequency = Transition(audioSource, "cutoffFrequency", clone.cutoffFrequency, targetCutoffFrequency);
+    }
+    
+    // Reverb
+    private void SetDefaultAudioReverbFilterSettings(AudioReverbFilter original, AudioReverbFilter clone)
+    {
+        clone.reverbPreset = original.reverbPreset;
+        
+        clone.room = Mathf.Lerp(-4000, 0f, _roomSize);
+        clone.decayTime = Mathf.Lerp(0.8f, 4f, _roomSize);
+        clone.reflectionsLevel = Mathf.Lerp(-6000, 20f, _reverbIntensity);
+        clone.reflectionsDelay = Mathf.Lerp(0f, 0.3f, _roomSize);
+        clone.reverbLevel = Mathf.Lerp(-3000, 180f, _reverbIntensity);
+        clone.reverbDelay = Mathf.Lerp(0f, 0.1f, _roomSize);
+    }
+    
+    private void SetDefaultAudioReverbFilterSettings(AudioReverbFilter clone)
+    {
+        clone.dryLevel = 0f;
+        
+        clone.diffusion = 100f;
+        clone.density = 100f;
+
+        clone.room = Mathf.Lerp(-4000, 0f, _roomSize);
+        clone.decayTime = Mathf.Lerp(0.8f, 4f, _roomSize);
+        clone.reflectionsLevel = Mathf.Lerp(-6000, 20f, _reverbIntensity);
+        clone.reflectionsDelay = Mathf.Lerp(0f, 0.3f, _roomSize);
+        clone.reverbLevel = Mathf.Lerp(-3000, 180f, _reverbIntensity);
+        clone.reverbDelay = Mathf.Lerp(0f, 0.1f, _roomSize);
+    }
+    
+    private void UpdateAudioReverbFilterSettings(AudioSource audioSource, AudioReverbFilter clone)
+    {
+        clone.room = Transition(audioSource, "room", clone.room, Mathf.Lerp(-4000, 0f, _roomSize));
+        clone.decayTime = Transition(audioSource, "decayTime", clone.decayTime, Mathf.Lerp(0.8f, 4f, _roomSize));
+        clone.reflectionsLevel = Transition(audioSource, "reflectionsLevel", clone.reflectionsLevel, Mathf.Lerp(-6000, 20f, _reverbIntensity));
+        clone.reflectionsDelay = Transition(audioSource, "reflectionsDelay", clone.reflectionsDelay, Mathf.Lerp(0f, 0.3f, _roomSize));
+        clone.reverbLevel = Transition(audioSource, "reverbLevel", clone.reverbLevel, Mathf.Lerp(-3000, 180f, _reverbIntensity));
+        clone.reverbDelay = Transition(audioSource, "reverbDelay", clone.reverbDelay, Mathf.Lerp(0f, 0.1f, _roomSize));
+    }
+
+
+    private readonly Dictionary<(AudioSource, string), float> _floatTransitionVelocities = new();
+    private readonly Dictionary<(AudioSource, string), Vector3> _vectorTransitionVelocities = new();
+    
+    private float Transition(AudioSource audioSource, string id, float current, float target)
+    {
+        var key = (audioSource, id);
+        
+        float velocity = _floatTransitionVelocities.GetValueOrDefault(key, 0f);
+        float result = Mathf.SmoothDamp(current, target, ref velocity, audioSourceSmoothTime);
+        
+        _floatTransitionVelocities[key] = velocity;
+        return result;
+    }
+    
+    private Vector3 Transition(AudioSource audioSource, string id, Vector3 current, Vector3 target)
+    {
+        var key = (audioSource, id);
+        
+        Vector3 velocity = _vectorTransitionVelocities.GetValueOrDefault(key, Vector3.zero);
+        Vector3 result = Vector3.SmoothDamp(current, target, ref velocity, audioSourceSmoothTime);
+        
+        _vectorTransitionVelocities[key] = velocity;
+        return result;
     }
 
     
@@ -511,7 +783,7 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
 
     private void UpdateDebugCanvases()
     {
-        List<AudioSource> audioSources = SS_AudioSourceManager.Instance.AudioSources;
+        List<AudioSource> audioSources = SS_AudioSourceManager.Instance.PlayingAudioSources;
 
         // Create
         foreach (AudioSource audioSource in audioSources)
@@ -545,10 +817,13 @@ public class SS_ListenerProbesDistributer : MonoBehaviour
         {
             if (!_debugCanvases.TryGetValue(audioSource, out SS_AudioSourceDebugCanvas debugCanvas))
                 continue;
+
+            float occlusion = _occlusions.GetValueOrDefault(audioSource, 0f);
             
             debugCanvas.UpdateInfo(
-                0.123123f,
-                0.45645f
+                occlusion,
+                _reverbIntensity,
+                _roomSize
             );
         }
     }
