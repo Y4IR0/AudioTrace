@@ -1,0 +1,11 @@
+{
+  "name": "dev.yairo.audiotrace",
+  "version": "1.0.0",
+  "displayName": "AudioTrace",
+  "description": "A Real-Time Probe-Based System for Spatial Audio",
+  "unity": "6000.6",
+  "author": {
+    "name": "Yairo Klarenbeek"
+  },
+  "license": "MIT"
+}
